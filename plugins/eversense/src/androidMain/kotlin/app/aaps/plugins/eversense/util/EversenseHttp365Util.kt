@@ -316,7 +316,7 @@ class EversenseHttp365Util {
             calibrations: List<CalibrationHistoryItem> = emptyList(),
             alerts: List<app.aaps.plugins.eversense.models.ActiveAlarm> = emptyList()
         ): UploadOutcome {
-            if (readings.isEmpty()) return UploadOutcome(success = true)
+            if (readings.isEmpty() && calibrations.isEmpty()) return UploadOutcome(success = true)
             val token = getOrRefreshToken(preferences) ?: run {
                 EversenseLogger.error(TAG, "Cannot post device events — no valid access token")
                 return UploadOutcome(success = false, error = "no valid access token")

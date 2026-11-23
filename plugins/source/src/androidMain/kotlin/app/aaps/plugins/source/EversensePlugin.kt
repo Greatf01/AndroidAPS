@@ -18,6 +18,9 @@ import app.aaps.core.interfaces.notifications.NotificationId
 import app.aaps.core.interfaces.notifications.NotificationLevel
 import app.aaps.core.interfaces.notifications.NotificationManager
 import app.aaps.plugins.eversense.models.ActiveAlarm
+import app.aaps.plugins.eversense.enums.CalibrationFlag
+import app.aaps.plugins.eversense.packets.e365.CalibrationHistoryItem
+import app.aaps.plugins.eversense.util.EversenseHttp365Util
 import app.aaps.core.data.model.GV
 import app.aaps.core.data.model.SourceSensor
 import app.aaps.core.data.model.TrendArrow
@@ -241,9 +244,31 @@ class EversensePlugin(
                 return@withContext false
             }
         }
-        val success = eversense.sendCalibration(bgMgDl)
+        val timestampMs = System.currentTimeMillis()
+        val success = eversense.sendCalibration(bgMgDl, timestampMs)
         aapsLogger.info(LTag.BGSOURCE, "Eversense calibration result: $success")
         if (success) {
+            if (eversense.is365() && cloudUploadEnabled()) {
+                val state = eversense.getCurrentState()
+                val txId = state.transmitterSerialNumber
+                if (txId.isNotBlank()) {
+                    val calibration = CalibrationHistoryItem(
+                        datetime = timestampMs,
+                        glucoseInMgDl = bgMgDl,
+                        flag = CalibrationFlag.ACTUALLY_USED_FOR_CALIBRATION
+                    )
+                    val result = EversenseHttp365Util.putDeviceEvents(
+                        securePrefs,
+                        emptyList(),
+                        txId,
+                        listOf(calibration),
+                        emptyList()
+                    )
+                    aapsLogger.info(LTag.BGSOURCE, "Eversense immediate calibration DMS upload: success=${result.success} status=${result.httpStatus}")
+                } else {
+                    aapsLogger.warn(LTag.BGSOURCE, "Eversense calibration DMS upload deferred: transmitter serial number unavailable")
+                }
+            }
             eversense.triggerFullSync(force = true)
             // Drives the home-screen "Calibration in progress" countdown banner.
             preferences.put(LongNonKey.EversenseLastCalibrationSubmittedAt, System.currentTimeMillis())
@@ -624,14 +649,6 @@ class EversensePlugin(
         }
 
         val latest = readings.maxByOrNull { it.datetime } ?: return true
-        val rawCalibrations = liveState.calibrationHistory.ifEmpty { state.calibrationHistory }
-        val calibrations = rawCalibrations.sortedBy { it.datetime }
-            .fold(mutableListOf<app.aaps.plugins.eversense.packets.e365.CalibrationHistoryItem>()) { acc, item ->
-                if (acc.isEmpty() || (item.datetime - acc.last().datetime) >= 20 * 60_000L) {
-                    acc.add(item)
-                }
-                acc
-            }
 
         return if (batch.type == EversenseType.EVERSENSE_365) {
             // The official E365 app identifies DMS records by the hardware serial, not the BLE name.
@@ -663,7 +680,7 @@ class EversensePlugin(
                 prefs,
                 dmsReadings,
                 txId,
-                calibrations,
+                emptyList(),
                 state.activeAlarms
             )
             aapsLogger.info(LTag.BGSOURCE, "Eversense batch upload (365 device events): success=${deviceEvents.success} sent=${deviceEvents.sentCount} status=${deviceEvents.httpStatus}")
@@ -671,6 +688,8 @@ class EversensePlugin(
             deviceEvents.success
         } else {
             val txId = state.transmitterName.ifEmpty { state.transmitterSerialNumber }
+            val calibrations = (liveState.calibrationHistory.ifEmpty { state.calibrationHistory })
+                .sortedBy { it.datetime }
             val portal = app.aaps.plugins.eversense.util.EversenseHttpE3Util.putCurrentValues(
                 prefs, latest.glucoseInMgDl, latest.datetime, latest.trend, state.sensorSignalStrength, state.batteryPercentage)
             if (!portal) return false
